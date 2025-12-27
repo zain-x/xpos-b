@@ -1,14 +1,14 @@
-export default async function handler(req, res) {
-  // CORS headers - allow requests from your app
-  res.setHeader('Access-Control-Allow-Credentials', true);
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
-  );
+const CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET,OPTIONS,PATCH,DELETE,POST,PUT",
+    "Access-Control-Allow-Headers": "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version",
+  };
 
-  // Handle preflight request
+  // Set CORS headers
+  Object.entries(CORS_HEADERS).forEach(([key, value]) => {
+    res.setHeader(key, value);
+  });
+
   if (req.method === 'OPTIONS') {
     res.status(200).end();
     return;
@@ -21,45 +21,73 @@ export default async function handler(req, res) {
   try {
     const { prompt, modelId } = req.body;
     
-    // Get the key from Vercel Environment Variables
-    const apiKey = process.env.OPENROUTER_KEY;
+    // Support multiple keys: split by comma if OPENROUTER_KEY has multiple, or use OPENROUTER_KEYS
+    const rawKeys = process.env.OPENROUTER_KEYS || process.env.OPENROUTER_KEY || "";
+    let apiKeys = rawKeys.split(',').map(k => k.trim()).filter(k => k);
 
-    if (!apiKey) {
-      return res.status(500).json({ error: 'Server configuration error: Missing API Key' });
+    if (apiKeys.length === 0) {
+      return res.status(500).json({ error: 'Server configuration error: Missing API Keys' });
     }
 
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://xpostr.app", // Optional: Change to your app URL
-        "X-Title": "xPostr", // Optional: Change to your app name
-      },
-      body: JSON.stringify({
-        model: modelId || "mistralai/mistral-7b-instruct:free",
-        messages: [
-          {
-            role: "system",
-            content: "You are an expert social media content generator. Your task is to output ONLY the raw tweet text. Do not include any introductory text, explanations, or quotes. Do not repeat the prompt. Ensure the tweet is within the character limit."
+    // Shuffle keys to distribute load (random load balancing)
+    apiKeys = apiKeys.sort(() => Math.random() - 0.5);
+
+    let lastError = null;
+
+    // Try keys one by one
+    for (const apiKey of apiKeys) {
+      try {
+        const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://xpostr.vercel.app",
+            "X-Title": "xPostr",
           },
-          {
-            role: "user",
-            content: prompt
-          }
-        ],
-      })
-    });
+          body: JSON.stringify({
+            "model": modelId || "xiaomi/mimo-v2-flash:free",
+            "messages": [
+              {
+                "role": "system",
+                "content": "You are an expert social media content generator. Output ONLY the raw tweet text. No intro, no quotes, no labels (like 'Tweet:'). If the prompt is in Arabic, reply in Arabic only."
+              },
+              { "role": "user", "content": prompt }
+            ]
+          })
+        });
 
-    const data = await response.json();
+        const data = await response.json();
 
-    if (!response.ok) {
-        throw new Error(data.error?.message || 'OpenRouter API error');
+        // If specific rate limit error, throw to catch block and try next key
+        if (data.error) {
+           // Check for rate limit or credit limit messages
+           const errMsg = (data.error.message || "").toLowerCase();
+           if (errMsg.includes("rate limit") || errMsg.includes("credits") || errMsg.includes("quota")) {
+               console.warn(`Key ...${apiKey.slice(-4)} hit limit: ${errMsg}. Switching key.`);
+               throw new Error(`Rate limit exceeded: ${errMsg}`); // This triggers the catch block below
+           }
+           // For other errors (e.g. invalid model), might not help to switch keys, but let's be safe and throw anyway
+           throw new Error(data.error.message || 'OpenRouter API Error');
+        }
+        
+        if (!data.choices || data.choices.length === 0) {
+           throw new Error('No content generated');
+        }
+
+        const content = data.choices[0].message.content;
+        return res.status(200).json({ content });
+
+      } catch (keyError) {
+        lastError = keyError;
+        // Continue to next key in loop
+        continue;
+      }
     }
 
-    // Return just the content string to match what the app expects
-    const content = data.choices[0].message.content;
-    return res.status(200).json({ content });
+    // If we exit the loop, all keys failed
+    console.error('All keys failed. Last error:', lastError);
+    return res.status(500).json({ error: lastError ? lastError.message : "All API keys failed" });
 
   } catch (error) {
     console.error('Proxy Error:', error);
