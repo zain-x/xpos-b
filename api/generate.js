@@ -1,4 +1,5 @@
-const CORS_HEADERS = {
+export default async function handler(req, res) {
+  const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,OPTIONS,PATCH,DELETE,POST,PUT",
     "Access-Control-Allow-Headers": "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version",
@@ -19,7 +20,15 @@ const CORS_HEADERS = {
   }
 
   try {
+    if (!req.body) {
+       return res.status(400).json({ error: 'Missing request body' });
+    }
+    
     const { prompt, modelId } = req.body;
+
+    if (!prompt) {
+       return res.status(400).json({ error: 'Missing prompt in request body' });
+    }
     
     // Support multiple keys: split by comma if OPENROUTER_KEY has multiple, or use OPENROUTER_KEYS
     const rawKeys = process.env.OPENROUTER_KEYS || process.env.OPENROUTER_KEY || "";
